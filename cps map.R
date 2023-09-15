@@ -1,3 +1,4 @@
+library(tidycensus)
 library(leaflegend)
 library(leaflet)
 library(leafpop)
@@ -6,6 +7,7 @@ library(stringdist)
 library(tidygeocoder)
 library(tidyverse)
 library(tigris)
+library(htmlwidgets)
 options(tigris_use_cache = TRUE)
 
 schools <- read_delim("cps.txt", delim = " ")
@@ -127,7 +129,10 @@ schools3 <- cross_join(school, geocoded_schools) |>
   select(SchoolID:SchoolType, geometry) |>
   arrange(str_to_title(School))
 
-allocations <- read.csv("~/neighborhood bg allocations.csv")
+allocations <- read.csv(
+  "~/neighborhood bg allocations.csv",
+  colClasses = c("character", rep("NULL", 3), "character", "numeric", "character")
+  )
 source("~/cchmc_colors.R")
 
 student <- read_delim(
@@ -369,6 +374,18 @@ hooded <- rbind(hooded1, hooded2) |>
   rbind(hooded6) |>
   rbind(hooded7)
 
+hooded_schools <- st_join(bg_lines, st_as_sf(schools3), left = FALSE) |>
+  as_tibble() |>
+  select(Neighborhood:SchoolType) |>
+  right_join(schools3) |>
+  mutate(
+    Neighborhood = case_when(
+      School == "Cheviot School" ~ "Cheviot",
+      School == "Silverton Elementary" ~ "Silverton",
+      TRUE ~ Neighborhood
+    )
+  )
+
 student <- left_join(student, hooded)
 
 student_add <- select(student, StudentID, Neighborhood)
@@ -384,8 +401,17 @@ df <- student |>
     ) |>
   left_join(attend) |>
   mutate(CA = PCNT < 90) |>
-  left_join(schools3) |>
-  select(StudentID:GradeLevel, Neighborhood, CA:SchoolType)
+  left_join(hooded_schools, join_by(SchoolID)) |>
+  mutate(InNeighborhood = Neighborhood.x == Neighborhood.y) |>
+  rename(Neighborhood = Neighborhood.x) |>
+  select(
+    StudentID:GradeLevel,
+    Neighborhood, 
+    CA, 
+    School, 
+    SchoolType, 
+    InNeighborhood
+    )
 
 hoods <- sort(unique(df$Neighborhood))
 
@@ -395,7 +421,7 @@ hood_es <- function(k){
       Neighborhood == k,
       SchoolType == "es"
       ) |>
-    group_by(School) |>
+    group_by(School, InNeighborhood) |>
     summarise(Students = n()) |>
     ungroup() |>
     mutate(
@@ -404,21 +430,27 @@ hood_es <- function(k){
       )
   
   small <- filter(x, Share < .01) |>
+    group_by(InNeighborhood) |>
     summarise(
       Students = sum(Students),
       Share = sum(Share),
       Total = mean(Total)
       ) |>
     mutate(School = "All other schools")
-  if (small$Students > 0){
+  
+  if(nrow(small) > 0){
     x <- filter(x, Share >= .01) |>
       rbind(small)
   }
   
-  ggplot(x, aes(x = reorder(School, Share), y = Share)) +
-    geom_bar(stat = "identity", fill = cchmclightblue) +
+  ggplot(x, aes(x = reorder(School, Share), y = Share, fill = InNeighborhood)) +
+    geom_bar(stat = "identity") +
     coord_flip() +
-    labs(x = NULL, y = "%", title = k) +
+    labs(x = NULL, y = "%", title = k, fill = NULL) +
+    scale_fill_manual(
+      values = c(cchmclightblue, cchmcmediumpurple),
+      labels = c("Out of neighborhood", "In neighborhood"),
+      ) +
     scale_y_continuous(
       limits = c(0, 1), 
       breaks = seq(0, 1, .2), 
@@ -445,7 +477,7 @@ hood_hs <- function(k){
       Neighborhood == k,
       SchoolType == "hs"
     ) |>
-    group_by(School) |>
+    group_by(School, InNeighborhood) |>
     summarise(Students = n()) |>
     ungroup() |>
     mutate(
@@ -454,21 +486,27 @@ hood_hs <- function(k){
     )
   
   small <- filter(x, Share < .01) |>
+    group_by(InNeighborhood) |>
     summarise(
       Students = sum(Students),
       Share = sum(Share),
       Total = mean(Total)
     ) |>
     mutate(School = "All other schools")
-  if (small$Students > 0){
+  
+  if (nrow(small) > 0){
     x <- filter(x, Share >= .01) |>
       rbind(small)
   }
 
-  ggplot(x, aes(x = reorder(School, Share), y = Share)) +
-    geom_bar(stat = "identity", fill = cchmclightblue) +
+  ggplot(x, aes(x = reorder(School, Share), y = Share, fill = InNeighborhood)) +
+    geom_bar(stat = "identity") +
     coord_flip() +
-    labs(x = NULL, y = "%", title = k) +
+    labs(x = NULL, y = "%", title = k, fill = NULL) +
+    scale_fill_manual(
+      values = c(cchmclightblue, cchmcmediumpurple),
+      labels = c("Out of neighborhood", "In neighborhood"),
+    ) +
     scale_y_continuous(
       limits = c(0, 1), 
       breaks = seq(0, 1, .2), 
@@ -489,15 +527,10 @@ hood_hs_popups <- lapply(hoods, function(k){
   hood_hs(k)
 })
 
-school_list <- sort(unique(df$School))
-
-school_graph <- function(k){
+hood_ca <- function(k){
   x <- df |>
-    filter(
-      School == k,
-      !is.na(Neighborhood)
-      ) |>
-    group_by(Neighborhood) |>
+    filter(Neighborhood == k, CA, !is.na(School)) |>
+    group_by(School) |>
     summarise(Students = n()) |>
     ungroup() |>
     mutate(
@@ -511,17 +544,82 @@ school_graph <- function(k){
       Share = sum(Share),
       Total = mean(Total)
     ) |>
+    mutate(School = "All other schools") |>
+    filter(Students > 0)
+  
+  if (nrow(small) > 0){
+    x <- filter(x, Share >= .01) |>
+      rbind(small)
+  }
+  
+  ggplot(x, aes(x = reorder(School, Share), y = Share)) +
+    geom_bar(stat = "identity", fill = cchmclightblue) +
+    coord_flip() +
+    labs(x = NULL, y = "%", title = k, fill = NULL) +
+    scale_y_continuous(
+      limits = c(0, 1), 
+      breaks = seq(0, 1, .2), 
+      labels = seq(0, 100, 20)
+    ) +
+    geom_text(aes(label = Students), hjust = -.5) +
+    annotate(
+      "text", 
+      label = paste(
+        ifelse(nrow(x) > 0, mean(x$Total), 0), 
+        "chronically absent students"
+        ), 
+      x = .75, 
+      y = .5
+    ) +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = .5))
+}
+
+hood_ca_popups <- lapply(hoods, function(k){
+  hood_ca(k)
+})
+
+school_list <- sort(unique(df$School))
+
+school_graph <- function(k){
+  x <- df |>
+    filter(
+      School == k,
+      !is.na(Neighborhood)
+      ) |>
+    group_by(Neighborhood, InNeighborhood) |>
+    summarise(Students = n()) |>
+    ungroup() |>
+    mutate(
+      Total = sum(Students),
+      Share = Students/Total
+    )
+  
+  small <- filter(x, Share < .01) |>
+    group_by(InNeighborhood) |>
+    summarise(
+      Students = sum(Students),
+      Share = sum(Share),
+      Total = mean(Total)
+    ) |>
     mutate(Neighborhood = "All other neighborhoods")
   
-  if (small$Students > 0){
+  if (nrow(small) > 0){
     x <- filter(x, Share >= .01) |>
       rbind(small) 
   }
   
-  ggplot(x, aes(x = reorder(Neighborhood, Share), y = Share)) +
-    geom_bar(stat = "identity", fill = cchmclightblue) +
+  ggplot(
+    x, 
+    aes(x = reorder(Neighborhood, Share), y = Share, fill = InNeighborhood) 
+    ) +
+    geom_bar(stat = "identity") +
     coord_flip() +
-    labs(x = NULL, y = "%", title = k) +
+    labs(x = NULL, y = "%", title = k, fill = NULL) +
+    scale_fill_manual(
+      values = c(cchmclightblue, cchmcmediumpurple),
+      labels = c("Out of neighborhood", "In neighborhood"),
+    ) +
     scale_y_continuous(
       limits = c(0, 1), 
       breaks = seq(0, 1, .2), 
@@ -542,20 +640,46 @@ school_popups <- lapply(school_list, function(k){
   school_graph(k)
 })
 
-hood_lines <- bg_lines |>
+boundaries <- block_groups(
+  year = 2021,
+  state = "OH",
+  county = "Hamilton"
+) |>
+  inner_join(allocations, multiple = "all") |>
+  group_by(GEOID) |>
+  mutate(Allocation = ifelse(Neighborhood == "California", 1, Allocation)) |>
+  filter(Allocation == max(Allocation)) |>
   group_by(Neighborhood) |>
-  summarise(geometry = st_union(geometry))
-
-all_lines <- select(muni_lines, Municipality, geometry) |>
-  filter(Municipality != "Cincinnati") |>
-  rename(Neighborhood = Municipality) |>
-  rbind(hood_lines) |>
+  summarise(geometry = st_union(geometry)) |>
   mutate(centroid = st_centroid(geometry))
+
+centroids <- st_coordinates(boundaries$centroid) |>
+  as_tibble() |>
+  mutate(
+    Neighborhood = boundaries$Neighborhood,
+    X = case_when(
+      Neighborhood == "Sycamore Township" ~ -84.3788,
+      Neighborhood == "Columbia Township" ~ -84.43163,
+      TRUE ~ X
+      ),
+    Y = case_when(
+      Neighborhood == "Sycamore Township" ~ 39.20386,
+      Neighborhood == "Columbia Township" ~ 39.192,
+      Neighborhood == "East End" ~ 39.122,
+      TRUE ~ Y
+      )
+    ) |>
+  st_as_sf(coords = c("X", "Y"), crs = "NAD83") |>
+  rename(centroid = geometry)
+
+boundaries <- as_tibble(select(boundaries, -centroid)) |>
+  inner_join(as_tibble(centroids)) |>
+  st_as_sf()
 
 ca <- df |>
   group_by(Neighborhood) |>
   summarise(CA = mean(CA, na.rm = TRUE)) |>
-  inner_join(all_lines) |>
+  inner_join(boundaries) |>
   mutate(
     Tier = case_when(
       CA >= .5 ~ "50%+",
@@ -564,17 +688,30 @@ ca <- df |>
       CA >= .2 ~ "20-29%",
       TRUE ~ "<20%"
     ),
-    Tier = factor(Tier, levels = c("<20%", "20-29%", "30-39%", "40-49%", "50%+"))
+    Tier = factor(Tier, levels = c("<20%", "20-29%", "30-39%", "40-49%", "50%+")),
+    CApct = paste0(round(CA*100, 1), "%")
   ) |>
   arrange(str_to_title(Neighborhood)) |>
   st_as_sf()
 
 pal <- colorFactor(
-  c("#76BC44", "#A1CA3C", "#9BD3DD", "#CA5699", "#83286B"), 
+  c(
+    cchmcdarkgreen, 
+    cchmclightgreen, 
+    cchmclightblue, 
+    cchmclightpurple, 
+    cchmcdarkpurple
+    ), 
   domain = ca$Tier
 )
 
-leaflet() |>
+labels <- sprintf(
+  "<strong>%s</strong><br/>%s chronically absent",
+  ca$Neighborhood, ca$CApct
+) |>
+  lapply(htmltools::HTML)
+
+school_map <- leaflet() |>
   addTiles() |>
   addPolygons(
     data = ca,
@@ -583,7 +720,13 @@ leaflet() |>
     smoothFactor = .5,
     opacity = 1,
     fillOpacity = .7,
-    fillColor = ~pal(Tier)
+    fillColor = ~pal(Tier),
+    highlightOptions = highlightOptions(
+      weight = 5,
+      color = cchmcdarkblue,
+      fillOpacity = .7
+    ),
+    label = labels
   ) |>
   addLegendFactor(
     pal = pal,
@@ -593,37 +736,50 @@ leaflet() |>
   ) |>
   addLayersControl(
     baseGroups = c(
-      "High schools", 
-      "Elementary schools",
-      "Neighborhoods"
+      "Chronic absence",
+      "High schools by neighborhood", 
+      "Elementary schools by neighborhood",
+      "Neighborhoods by school"
     ),
     position = "bottomright",
     options = layersControlOptions(collapsed = FALSE)
   ) |>
   addCircleMarkers(
     data = ca$centroid,
-    color = "#E64479",
+    color = cchmcpink,
+    stroke = FALSE,
+    fillOpacity = 1,
+    radius = 4,
+    popup = popupGraph(hood_ca_popups, height = 400, width = 500),
+    group = "Chronically absent by neighborhood"
+  ) |>
+  addCircleMarkers(
+    data = ca$centroid,
+    color = cchmcpink,
     stroke = FALSE,
     fillOpacity = 1,
     radius = 4,
     popup = popupGraph(hood_hs_popups, height = 400, width = 500),
-    group = "High schools"
+    group = "High schools by neighborhood"
   ) |>
   addCircleMarkers(
     data = ca$centroid,
-    color = "#E64479",
+    color = cchmcpink,
     stroke = FALSE,
     fillOpacity = 1,
     radius = 4,
     popup = popupGraph(hood_es_popups, height = 400, width = 500),
-    group = "Elementary schools"
+    group = "Elementary schools by neighborhood"
   ) |>
   addCircleMarkers(
     data = schools3$geometry,
-    color = "#E64479",
+    color = cchmcpink,
     stroke = FALSE,
     fillOpacity = 1,
     radius = 4,
     popup = popupGraph(school_popups, height = 400, width = 500),
-    group = "Neighborhoods"
+    group = "Neighborhoods by school"
   )
+
+saveWidget(school_map, "school_map.html")
+cumsum(1:100)
