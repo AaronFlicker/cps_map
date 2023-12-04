@@ -8,103 +8,57 @@ library(tidygeocoder)
 library(tidyverse)
 library(tigris)
 library(htmlwidgets)
+library(cincy)
 options(tigris_use_cache = TRUE)
 
-schools <- read_delim("cps.txt", delim = " ")
-colnames(schools) <- c(LETTERS[1:5], LETTERS[7:13])
-schools2 <- schools |>
-  mutate(
-    Num1 = parse_number(C),
-    Num2 = parse_number(D),
-    Num3 = parse_number(E),
-    Num4 = parse_number(G),
-    Num5 = parse_number(H),
-    Num6 = parse_number(I),
-    Num7 = parse_number(J),
-    Number = coalesce(Num1, Num2),
-    Number = coalesce(Number, Num3),
-    Number = coalesce(Number, Num4),
-    Number = coalesce(Number, Num5),
-    Number = coalesce(Number, Num6),
-    Number = coalesce(Number, Num7),
-    Number = ifelse(B == "Promise", "5425", Number),
-    Name = paste(A, B),
-    Name = ifelse(C == Number, Name, paste(Name, C)),
-    Name = ifelse(Number == C | Number == D, Name, paste(Name, D)),
-    Name  = ifelse(
-      Number == C | Number == D | Number == E,
-      Name,
-      paste(Name, E)
-    ),
-    Name  = ifelse(
-      Number == C | Number == D | Number == E | Number == G,
-      Name,
-      paste(Name, G)
-    ),
-    Name  = ifelse(
-      Number == C | Number == D | Number == E | Number == G | Number == H,
-      Name,
-      paste(Name, H)
-    ),
-    Combo = paste(A, B, C, D, E, G, H, I, J, K, L, M),
-    Combo = str_remove(Combo, Name),
-    Combo = str_remove(Combo, Number),
-    Combo = str_trim(Combo)
-  ) |>
-  separate_wider_delim(
-    Combo, 
-    delim = ",", 
-    names = c("Street", "City", "Rest"), 
-    too_few = "align_start"
-  ) |>
-  mutate(Rest = str_trim(Rest)) |>
-  separate_wider_delim(
-    Rest, 
-    delim = " ", 
-    names = c("State", "Zip"), 
-    too_many = "drop"
-  ) |>
-  mutate(
-    City = "Cincinnati",
-    State = "OH",
-    Street = ifelse(B == "Promise", "Winton Ridge Lane", Street),
-    Zip = ifelse(Name == "Mt. Washington School", "45230", Zip),
-    Name = ifelse(B == "Promise", "The Promise Center", Name),
-    Name = ifelse(
-      str_detect(Name, "Gamble Montessori Elementary"),
-      "Gamble Montessori Elementary School",
-      Name
-    ),
-    Name = ifelse(str_detect(Name, "Aiken"), "Aiken High School", Name)
-  ) |>
-  distinct(Name, Number, Street, City, State, Zip) |>
-  filter(
-    !Name %in% c(
-      "Cincinnati Digital Academy", 
-      "Virtual High School",
-      "Hospital/Satellite Program Office"
+school <- read_delim(
+  "school.txt",
+  col_names = c("SchoolID", "School", "SchoolType", "SchoolStateCode"),
+  skip = 1
+) |>
+  filter(!is.na(SchoolType)) 
+
+school_adds <- read_csv(
+  "cps.csv",
+  col_names = c(
+    LETTERS[1:5], 
+    LETTERS[7:9], 
+    "StreetNum", 
+    LETTERS[10:13], 
+    "City", 
+    "State", 
+    "Zip"
     )
   ) |>
   mutate(
-    Address = paste(Number, Street),
-    Type = "School",
-    Name = 
-      case_when(
-        str_detect(Name, "AMIS") ~ "AMIS School",
-        Name == "Rising Stars at Vine" ~ "RS at Vine",
-        Name == "Clifton Area Neighborhood School" ~ "CANS School",
-        TRUE ~ Name
-      )
-  ) |>
-  filter(!Name %in% c(
-    "Juvenile Detention Center", 
-    "The Promise Center"
+    School = NA,
+    Street = NA
     )
-    ) |>
-  select(-c(Street, Number))
+
+for (i in 1:nrow(school_adds)){
+  for(j in 1:8){
+    if(!is.na(school_adds[i, j])){
+      school_adds$School[i] <- paste(school_adds$School[i], school_adds[i, j])
+    }
+  }
+  for(k in 10:12){
+    if(!is.na(school_adds[i, k])){
+      school_adds$Street[i] <- paste(school_adds$Street[i], school_adds[i, k])
+    }
+  }
+}
+school_adds$School <- str_remove(school_adds$School, "NA ")
+school_adds$Street <- str_remove(school_adds$Street, "NA ")
+school_adds$Address <- paste(
+  school_adds$StreetNum, 
+  school_adds$Street, 
+  school_adds$M, 
+  sep = " "
+  )
+school_adds <- select(school_adds, School, Address, City:Zip)
 
 geocoded_schools <- geocode(
-  schools2,
+  school_adds,
   street = Address,
   city = City,
   state = State,
@@ -113,26 +67,10 @@ geocoded_schools <- geocode(
 ) |>
   st_as_sf(coords = c("long", "lat"), crs = "NAD83")
 
-school <- read_delim(
-  "school.txt",
-  col_names = c("SchoolID", "School", "SchoolType", "SchoolStateCode"),
-  skip = 1
-) |>
-  mutate(SchoolID = as.character(SchoolID)) |>
-  filter(!is.na(SchoolType)) 
+schools2 <- full_join(geocoded_schools, school) |>
+  filter(!is.na(SchoolType)) |>
+  mutate(SchoolID = as.character(SchoolID))
 
-schools3 <- cross_join(school, geocoded_schools) |>
-  mutate(dist = stringdist(School, Name, method = "jw")) |>
-  group_by(Name) |>
-  filter(dist == min(dist)) |>
-  ungroup() |>
-  select(SchoolID:SchoolType, geometry) |>
-  arrange(str_to_title(School))
-
-allocations <- read.csv(
-  "~/neighborhood bg allocations.csv",
-  colClasses = c("character", rep("NULL", 3), "character", "numeric", "character")
-  )
 source("~/cchmc_colors.R")
 
 student <- read_delim(
@@ -153,12 +91,13 @@ student <- read_delim(
     rep(NA, 3), 
     "Address", 
     rep(NA, 3), 
-    "Zip", 
+    "zip", 
     rep(NA, 13), 
     "Remote"
     ),
   skip = 1
-  )
+  ) |>
+  mutate_if(is.numeric, as.character)
 
 attend <- read_delim(
   "attend_pct.txt",
@@ -178,11 +117,15 @@ attend <- read_delim(
   mutate(
     StudentID = as.character(StudentID),
     SchoolID = as.character(SchoolID)
-  )
+  ) |>
+  inner_join(student)
 
 adds <- student |>
   filter(!is.na(Address)) |>
-  mutate(Address2 = Address) |>
+  mutate(
+    Address2 = Address,
+    Zip = str_trunc(zip, 5, "right", ellipsis = "")
+    ) |>
   separate_wider_delim(
     Address2,
     delim = ",",
@@ -192,7 +135,7 @@ adds <- student |>
   ) 
   
 adds_unique <- adds |>
-  distinct(Address2, Zip) |>
+  distinct(Address2, zip, Zip) |>
   mutate(AddID = row_number())
 
 adds <- left_join(adds, adds_unique) 
@@ -210,11 +153,7 @@ to_geocode <- adds_unique |>
 geocoded <- read.csv("for_degauss_geocoded_v3.0.2.csv") |>
   rename(AddID = ID)
 
-uncoded <- geocoded |>
-  filter(
-    matched_state != "OH" |
-      is.na(lat)
-  )
+uncoded <- filter(geocoded, matched_state != "OH" | is.na(lat))
 
 coded <- anti_join(geocoded, uncoded, join_by(AddID))
 
@@ -232,7 +171,17 @@ cleaned <- anti_join(uncoded, hooded1, join_by(AddID)) |>
     address = str_replace(address, "Eastknoll", "E Knoll"),
     address = str_replace(address, "Sixty-Fourth", "64th"),
     address = str_replace(address, "Thirty Fourth", "34th"),
-    address = str_replace(address, "Seventieth", "70th")
+    address = str_replace(address, "Seventieth", "70th"),
+    address = str_replace(address, "St Albans", "Saint Albans"),
+    address = str_replace(address, "St Leger", "Saint Leger"),
+    address = str_replace(address, "Mistyoak", "Misty Oak"),
+    address = str_replace(address, "Northglen", "N Glen"),
+    address = str_replace(address, "O Bryan", "Obryan"),
+    address = str_replace(address, "Toronto", " Toronto"),
+    address = str_replace(address, "St Elmo", "Saint Elmo"),
+    address = str_replace(address, "St Charles", "Saint Charles"),
+    address = str_replace(address, "St Catherine", "Saint Catherine"),
+    address = str_replace(address, "St Michael", "Saint Michael")
     ) |>
   select(AddID, address)
 
@@ -247,18 +196,16 @@ coded2 <- filter(geocoded2, !is.na(lat)) |>
 hooded2 <- filter(geocoded2, is.na(lat)) |>
   mutate(
     Neighborhood = case_when(
-      AddID == 5969 ~ "Springfield Township",
-      AddID %in% c(15110, 17136) ~ "Green Township",
-      AddID == 18173 ~ "Anderson Township",
-      str_detect(address, "St Albans") ~ "Golf Manor",
-      AddID == 11493 ~ "College Hill",
-      AddID %in% c(1407, 7477) ~ "Westwood",
-      str_detect(address, "Mclelland") ~ "Westwood",
-      AddID == 12409 ~ "Avondale",
-      AddID == 18013 ~ "Hyde Park",
+      str_detect(address, "Taft") ~ "East Walnut Hills",
       str_detect(address, "Misty") ~ "Bond Hill",
-      AddID == 12530 ~ "Walnut Hills",
-      AddID == 18568 ~ "Bond Hill",
+      str_detect(address, "Albans") ~ "Golf Manor",
+      str_detect(address, "Vista") ~ "Hyde Park",
+      str_detect(address, "Geyer") | str_detect(address, "Mclellan") ~ 
+        "Westwood",
+      str_detect(address, "Forestview") | str_detect(address, "Glen") ~ 
+        "Green Township",
+      str_detect(address, "Sweetbay") ~ "Colerain Township",
+      str_detect(address, "toronto") ~ "Anderson Township",
       TRUE ~ NA
       )
     ) |>
@@ -285,87 +232,60 @@ hooded3 <- anti_join(as_tibble(coded2), munis, join_by(AddID)) |>
 
 single <- filter(munis, count == 1)
 
-multi <- filter(munis, count > 1) |>
+hooded4 <- filter(munis, count > 1) |>
   inner_join(adds_unique) |>
   mutate(
     Neighborhood = case_when(
-      AddID == 14696 ~ "St. Bernard",
-      AddID %in% c(3898, 8048) ~ "Cheviot",
-      AddID == 7462 ~ "Norwood",
-      str_detect(Address2, "Murray") ~ "Columbia Township",
-      AddID == 6061 ~ "Sycamore Township",
-      AddID == 13424 ~ "Springfield Township"
+     str_detect(Address2, "Mitchell") ~ "St. Bernard",
+     str_detect(Address2, "Puhlman") | str_detect(Address2, "Harrison") ~ 
+       "Cheviot",
+     str_detect(Address2, "Section") ~ "Norwood",
+     str_detect(Address2, "Murray") ~ "Columbia Township",
+     str_detect(Address2, "Plainfield") ~ "Kennedy Heights",
+     str_detect(Address2, "Arbre") ~ "Sycamore Township",
+     str_detect(Address2, "Mayfair") ~ "Springfield Township",
+     TRUE ~ NA
       )
     ) |>
   distinct(AddID, Neighborhood)
-
-hooded4 <- filter(multi, !is.na(Neighborhood))
 
 hooded5 <- filter(single, Municipality != "Cincinnati") |>
   rename(Neighborhood = Municipality) |>
   as_tibble() |>
   select(AddID, Neighborhood)
 
-cinci <- single |>
-  rbind(
-    inner_join(munis, filter(multi, is.na(Neighborhood)) 
-               |> select(-Neighborhood))
-    ) |>
-  filter(Municipality == "Cincinnati") |>
+hood_lines <- neigh_sna |>
+  mutate(SHAPE = st_transform(SHAPE, crs = "NAD83"))
+
+cinci <- filter(single, Municipality == "Cincinnati") |>
   as_tibble() |>
   select(AddID, lat, lon) |>
-  st_as_sf(coords = c("lon", "lat"), crs = 'NAD83', remove = FALSE)
+  st_as_sf(coords = c("lon", "lat"), crs = "NAD83") |>
+  st_join(hood_lines)
 
-bg_lines <- block_groups(state = "OH", county = "Hamilton") |>
-  select(GEOID, geometry) |>
-  mutate(GEOID = as.numeric(GEOID)) |>
-  inner_join(allocations, multiple = "all") |>
-  filter(Municipality == "Cincinnati") |>
-  st_as_sf() 
-  
-bg <- st_join(bg_lines, cinci) |>
-  filter(!is.na(AddID))
+hooded6 <- filter(cinci, !is.na(neighborhood)) |>
+  as_tibble() |>
+  select(AddID, Neighborhood = neighborhood) 
 
-bg2 <- bg |>
-  distinct(AddID, Neighborhood) |>
-  group_by(AddID) |>
-  mutate(count = n())
-
-hooded6 <- filter(bg2, count == 1) |>
-  select(-count) 
-
-hooded7 <- filter(bg2, count > 1) |>
-  distinct(AddID) |>
-  inner_join(bg, multiple = "all") |>
+hooded7 <- filter(cinci, is.na(neighborhood)) |>
   inner_join(adds_unique) |>
   mutate(
     Neighborhood = case_when(
-      AddID == 2073 ~ "Avondale",
-      AddID %in% c(5990, 5903) ~ "College Hill",
-      AddID %in% c(5554, 18917, 2893, 6505) ~ "CUF",
-      AddID == 1766 ~ "East Price Hill",
-      AddID %in% c(18400, 6359, 13652) ~ "East Walnut Hills",
-      AddID == 11080 ~ "East Westwood",
-      AddID == 16354 ~ "Hyde Park",
-      AddID == 2978 ~ "Millvale",
-      AddID %in% c(10216, 9335, 3228, 9787) ~ "Mt. Airy",
-      AddID %in% c(10289, 2222, 13849) ~ "Mt. Auburn",
-      AddID %in% c(17470, 19793) ~ "Mt. Lookout",
-      AddID == 19607 ~ "North Avondale",
-      AddID %in% c(1014, 19699, 2312) ~ "North Fairmount",
-      AddID %in% c(920, 19379) ~ "Paddock Hills",
-      AddID %in% c(14900, 297) ~ "Pleasant Ridge",
-      AddID == 19104 ~ "Sayler Park",
-      AddID %in% c(11805, 9389) ~ "South Fairmount",
-      AddID == 7223 ~ "Walnut Hills",
-      AddID == 5872 ~ "West Price Hill",
-      AddID %in% c(3788, 8952, 3852) ~ "Westwood",
-      str_detect(Address2, "Seymour") ~ "Roselawn",
-      str_detect(Address2, "St Leo") ~ "North Fairmount",
+      str_detect(Address2, "Hillsdale") ~ "Wyoming",
+      str_detect(Address2, "Englewood") |
+        str_detect(Address2, "Elbrook") |
+        str_detect(Address2, "Montgomery") ~ "Pleasant Ridge",
+      str_detect(Address2, "Caldwell") | str_detect(Address2, "Marley") ~
+        "Springfield Township",
+      str_detect(Address2, "Everett") | str_detect(Address2, "Herbert") ~ 
+        "Cheviot",
+      str_detect(Address2, "Old Red Bank") ~ "Oakley",
+      str_detect(Address2, "Plainfield") ~ "Kennedy Heights",
       TRUE ~ NA
     )
   ) |>
-  distinct(AddID, Neighborhood)
+  as_tibble() |>
+  select(AddID, Neighborhood)
 
 hooded <- rbind(hooded1, hooded2) |>
   rbind(hooded3) |>
@@ -374,212 +294,112 @@ hooded <- rbind(hooded1, hooded2) |>
   rbind(hooded6) |>
   rbind(hooded7)
 
-hooded_schools <- st_join(bg_lines, st_as_sf(schools3), left = FALSE) |>
-  as_tibble() |>
-  select(Neighborhood:SchoolType) |>
-  right_join(schools3) |>
+# hooded_schools <- st_join(bg_lines, st_as_sf(schools3), left = FALSE) |>
+#   as_tibble() |>
+#   select(Neighborhood:SchoolType) |>
+#   right_join(schools3) |>
+#   mutate(
+#     Neighborhood = case_when(
+#       School == "Cheviot School" ~ "Cheviot",
+#       School == "Silverton Elementary" ~ "Silverton",
+#       TRUE ~ Neighborhood
+#     )
+#   )
+
+
+df <- left_join(student, hooded) |>
   mutate(
-    Neighborhood = case_when(
-      School == "Cheviot School" ~ "Cheviot",
-      School == "Silverton Elementary" ~ "Silverton",
-      TRUE ~ Neighborhood
-    )
-  )
-
-student <- left_join(student, hooded)
-
-student_add <- select(student, StudentID, Neighborhood)
-
-# student2 <- read_delim("student.txt") |>
-#   inner_join(student_add, by = c("Student ID" = "StudentID"))
-# write_csv(student2, "student with neighborhood.csv")  
-
-df <- student |>
-  mutate(
+    Neighborhood = fct_na_value_to_level(Neighborhood),
     StudentID = as.character(StudentID),
     SchoolID = as.character(SchoolID)
     ) |>
-  left_join(attend) |>
-  mutate(CA = PCNT < 90) |>
-  left_join(hooded_schools, join_by(SchoolID)) |>
-  mutate(InNeighborhood = Neighborhood.x == Neighborhood.y) |>
-  rename(Neighborhood = Neighborhood.x) |>
-  select(
-    StudentID:GradeLevel,
-    Neighborhood, 
-    CA, 
-    School, 
-    SchoolType, 
-    InNeighborhood
-    )
+  inner_join(attend) |>
+  mutate(CA = ifelse(PCNT < 90, "Chronically absent", "Not chronically absent")) |>
+  left_join(schools2, join_by(SchoolID)) |>
+  select(StudentID, Neighborhood, CA, School, SchoolID, SchoolType)
 
-hoods <- sort(unique(df$Neighborhood))
+boundaries <- filter(muni_lines, Municipality != "Cincinnati") |>
+  select(Neighborhood = Municipality, geometry) |>
+  rbind(hood_lines |> rename(Neighborhood = neighborhood, geometry = SHAPE)) |>
+  mutate(centroid = st_centroid(geometry))
 
-hood_es <- function(k){
+hoods <- sort(unique(df$Neighborhood[df$Neighborhood %in% boundaries$Neighborhood]))
+
+hood_graph <- function(a, b){
   x <- df |>
     filter(
-      Neighborhood == k,
-      SchoolType == "es"
+      SchoolType == a,
+      Neighborhood == b
       ) |>
-    group_by(School, InNeighborhood) |>
-    summarise(Students = n()) |>
-    ungroup() |>
-    mutate(
-      Total = sum(Students),
-      Share = Students/Total
-      )
+      group_by(School, CA) |>
+      summarise(Students = n()) |>
+      ungroup() |>
+      mutate(
+        Total = sum(Students),
+        Share = Students/Total
+      ) |>
+      group_by(School) |>
+      mutate(SchoolShare = sum(Share))
+
+  small <- filter(x, SchoolShare < .1)
   
-  small <- filter(x, Share < .01) |>
-    group_by(InNeighborhood) |>
+  small <- small |>
+    mutate(School = paste(length(unique(small$School)), "other schools")) |>
+    group_by(CA, School) |>
     summarise(
       Students = sum(Students),
       Share = sum(Share),
       Total = mean(Total)
-      ) |>
-    mutate(School = "All other schools")
+    ) |>
+    ungroup() |>
+    mutate(SchoolShare = sum(Share))
   
-  if(nrow(small) > 0){
-    x <- filter(x, Share >= .01) |>
-      rbind(small)
-  }
+  x <- filter(x, SchoolShare >= .1) |>
+    rbind(small)
   
-  ggplot(x, aes(x = reorder(School, Share), y = Share, fill = InNeighborhood)) +
+  ggplot(x, aes(x = reorder(School, Share), y = Share, fill = CA)) +
     geom_bar(stat = "identity") +
     coord_flip() +
-    labs(x = NULL, y = "%", title = k, fill = NULL) +
+    labs(x = NULL, y = "%", title = b, fill = NULL) +
     scale_fill_manual(
-      values = c(cchmclightblue, cchmcmediumpurple),
-      labels = c("Out of neighborhood", "In neighborhood"),
-      ) +
+      values = c(cchmcdarkblue, cchmclightblue)
+    ) +
     scale_y_continuous(
       limits = c(0, 1), 
       breaks = seq(0, 1, .2), 
       labels = seq(0, 100, 20)
-      ) +
-    geom_text(aes(label = Students), hjust = -.5) +
+    ) +
+    geom_text(
+      aes(label = Students), 
+      y = ifelse(x$CA == "Not chronically absent", .03, x$SchoolShare+.03)
+    ) +
     annotate(
       "text", 
-      label = paste(mean(x$Total), "total students"), 
+      label = paste(format(mean(x$Total), big.mark = ","), "total students"), 
       x = .75, 
       y = .5
-      ) +
+    ) +
     theme_minimal() +
-    theme(plot.title = element_text(hjust = .5))
-}
-
-hood_es_popups <- lapply(hoods, function(k){
-  hood_es(k)
-})
-
-hood_hs <- function(k){
-  x <- df |>
-    filter(
-      Neighborhood == k,
-      SchoolType == "hs"
-    ) |>
-    group_by(School, InNeighborhood) |>
-    summarise(Students = n()) |>
-    ungroup() |>
-    mutate(
-      Total = sum(Students),
-      Share = Students/Total
+    theme(
+      plot.title = element_text(hjust = .5),
+      legend.position = "bottom"
     )
-  
-  small <- filter(x, Share < .01) |>
-    group_by(InNeighborhood) |>
-    summarise(
-      Students = sum(Students),
-      Share = sum(Share),
-      Total = mean(Total)
-    ) |>
-    mutate(School = "All other schools")
-  
-  if (nrow(small) > 0){
-    x <- filter(x, Share >= .01) |>
-      rbind(small)
-  }
-
-  ggplot(x, aes(x = reorder(School, Share), y = Share, fill = InNeighborhood)) +
-    geom_bar(stat = "identity") +
-    coord_flip() +
-    labs(x = NULL, y = "%", title = k, fill = NULL) +
-    scale_fill_manual(
-      values = c(cchmclightblue, cchmcmediumpurple),
-      labels = c("Out of neighborhood", "In neighborhood"),
-    ) +
-    scale_y_continuous(
-      limits = c(0, 1), 
-      breaks = seq(0, 1, .2), 
-      labels = seq(0, 100, 20)
-    ) +
-    geom_text(aes(label = Students), hjust = -.5) +
-    annotate(
-      "text", 
-      label = paste(mean(x$Total), "total students"), 
-      x = .75, 
-      y = .5
-    ) +
-    theme_minimal() +
-    theme(plot.title = element_text(hjust = .5))
 }
 
-hood_hs_popups <- lapply(hoods, function(k){
-  hood_hs(k)
+hood_es_popups <- lapply(hoods, function(b){
+  hood_graph("es", b)
 })
 
-hood_ca <- function(k){
-  x <- df |>
-    filter(Neighborhood == k, CA, !is.na(School)) |>
-    group_by(School) |>
-    summarise(Students = n()) |>
-    ungroup() |>
-    mutate(
-      Total = sum(Students),
-      Share = Students/Total
-    )
-  
-  small <- filter(x, Share < .01) |>
-    summarise(
-      Students = sum(Students),
-      Share = sum(Share),
-      Total = mean(Total)
-    ) |>
-    mutate(School = "All other schools") |>
-    filter(Students > 0)
-  
-  if (nrow(small) > 0){
-    x <- filter(x, Share >= .01) |>
-      rbind(small)
-  }
-  
-  ggplot(x, aes(x = reorder(School, Share), y = Share)) +
-    geom_bar(stat = "identity", fill = cchmclightblue) +
-    coord_flip() +
-    labs(x = NULL, y = "%", title = k, fill = NULL) +
-    scale_y_continuous(
-      limits = c(0, 1), 
-      breaks = seq(0, 1, .2), 
-      labels = seq(0, 100, 20)
-    ) +
-    geom_text(aes(label = Students), hjust = -.5) +
-    annotate(
-      "text", 
-      label = paste(
-        ifelse(nrow(x) > 0, mean(x$Total), 0), 
-        "chronically absent students"
-        ), 
-      x = .75, 
-      y = .5
-    ) +
-    theme_minimal() +
-    theme(plot.title = element_text(hjust = .5))
-}
-
-hood_ca_popups <- lapply(hoods, function(k){
-  hood_ca(k)
+hood_hs_popups <- lapply(hoods, function(b){
+  hood_graph("hs", b)
 })
 
-school_list <- sort(unique(df$School))
+schools3 <- inner_join(schools2, df, multiple = "all") |>
+  distinct(School, Address, geometry) |>
+  filter(!is.na(Address)) |>
+  arrange(str_to_title(School))
+
+school_list <- sort(unique(schools3$School))
 
 school_graph <- function(k){
   x <- df |>
@@ -587,71 +407,70 @@ school_graph <- function(k){
       School == k,
       !is.na(Neighborhood)
       ) |>
-    group_by(Neighborhood, InNeighborhood) |>
+    group_by(Neighborhood, CA) |>
     summarise(Students = n()) |>
     ungroup() |>
     mutate(
       Total = sum(Students),
       Share = Students/Total
-    )
+    ) |>
+    group_by(Neighborhood) |>
+    mutate(HoodShare = sum(Share))
   
-  small <- filter(x, Share < .01) |>
-    group_by(InNeighborhood) |>
+  small <- filter(x, HoodShare < .1)
+  small <- small |>
+    mutate(
+      Neighborhood = paste(
+        length(unique(small$Neighborhood)), 
+        "other neighborhoods"
+        )
+      ) |>
+    group_by(CA, Neighborhood) |>
     summarise(
       Students = sum(Students),
       Share = sum(Share),
       Total = mean(Total)
     ) |>
-    mutate(Neighborhood = "All other neighborhoods")
+    ungroup() |>
+    mutate(HoodShare = sum(Share))
   
   if (nrow(small) > 0){
-    x <- filter(x, Share >= .01) |>
-      rbind(small) 
+    x <- filter(x, HoodShare >= .1) |>
+      rbind(small)
   }
   
-  ggplot(
-    x, 
-    aes(x = reorder(Neighborhood, Share), y = Share, fill = InNeighborhood) 
-    ) +
+  ggplot(x, aes(x = reorder(Neighborhood, Share), y = Share, fill = CA)) +
     geom_bar(stat = "identity") +
     coord_flip() +
     labs(x = NULL, y = "%", title = k, fill = NULL) +
     scale_fill_manual(
-      values = c(cchmclightblue, cchmcmediumpurple),
-      labels = c("Out of neighborhood", "In neighborhood"),
+      values = c(cchmcdarkblue, cchmclightblue)
     ) +
     scale_y_continuous(
       limits = c(0, 1), 
       breaks = seq(0, 1, .2), 
       labels = seq(0, 100, 20)
     ) +
-    geom_text(aes(label = Students), hjust = -.5) +
+    geom_text(
+      aes(label = Students), 
+      y = ifelse(x$CA == "Not chronically absent", .03, x$HoodShare+.03)
+    ) +
     annotate(
       "text", 
-      label = paste(mean(x$Total), "total students"), 
+      label = paste(format(mean(x$Total), big.mark = ","), "total students"), 
       x = .75, 
       y = .5
     ) +
     theme_minimal() +
-    theme(plot.title = element_text(hjust = .5))
+    theme(
+      plot.title = element_text(hjust = .5),
+      legend.position = "bottom"
+      )
 }
 
 school_popups <- lapply(school_list, function(k){
   school_graph(k)
 })
-
-boundaries <- block_groups(
-  year = 2021,
-  state = "OH",
-  county = "Hamilton"
-) |>
-  inner_join(allocations, multiple = "all") |>
-  group_by(GEOID) |>
-  mutate(Allocation = ifelse(Neighborhood == "California", 1, Allocation)) |>
-  filter(Allocation == max(Allocation)) |>
-  group_by(Neighborhood) |>
-  summarise(geometry = st_union(geometry)) |>
-  mutate(centroid = st_centroid(geometry))
 
 centroids <- st_coordinates(boundaries$centroid) |>
   as_tibble() |>
@@ -659,12 +478,12 @@ centroids <- st_coordinates(boundaries$centroid) |>
     Neighborhood = boundaries$Neighborhood,
     X = case_when(
       Neighborhood == "Sycamore Township" ~ -84.3788,
-      Neighborhood == "Columbia Township" ~ -84.43163,
+      Neighborhood == "Columbia Township" ~ -84.3976,
       TRUE ~ X
       ),
     Y = case_when(
       Neighborhood == "Sycamore Township" ~ 39.20386,
-      Neighborhood == "Columbia Township" ~ 39.192,
+      Neighborhood == "Columbia Township" ~ 39.17114,
       Neighborhood == "East End" ~ 39.122,
       TRUE ~ Y
       )
@@ -678,7 +497,7 @@ boundaries <- as_tibble(select(boundaries, -centroid)) |>
 
 ca <- df |>
   group_by(Neighborhood) |>
-  summarise(CA = mean(CA, na.rm = TRUE)) |>
+  summarise(CA = mean(CA == "Chronically absent")) |>
   inner_join(boundaries) |>
   mutate(
     Tier = case_when(
@@ -711,6 +530,16 @@ labels <- sprintf(
 ) |>
   lapply(htmltools::HTML)
 
+cinci_icons <- icons(
+  iconUrl = ifelse(
+    schools3$SchoolType == "es", 
+    "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png",
+    "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-yellow.png"
+  ),
+  iconWidth = 20,
+  iconHeight = 30
+)
+
 school_map <- leaflet() |>
   addTiles() |>
   addPolygons(
@@ -736,22 +565,12 @@ school_map <- leaflet() |>
   ) |>
   addLayersControl(
     baseGroups = c(
-      "Chronic absence",
       "High schools by neighborhood", 
       "Elementary schools by neighborhood",
       "Neighborhoods by school"
     ),
     position = "bottomright",
     options = layersControlOptions(collapsed = FALSE)
-  ) |>
-  addCircleMarkers(
-    data = ca$centroid,
-    color = cchmcpink,
-    stroke = FALSE,
-    fillOpacity = 1,
-    radius = 4,
-    popup = popupGraph(hood_ca_popups, height = 400, width = 500),
-    group = "Chronically absent by neighborhood"
   ) |>
   addCircleMarkers(
     data = ca$centroid,
@@ -773,13 +592,34 @@ school_map <- leaflet() |>
   ) |>
   addCircleMarkers(
     data = schools3$geometry,
-    color = cchmcpink,
+    color = cchmcdarkblue,
     stroke = FALSE,
     fillOpacity = 1,
     radius = 4,
     popup = popupGraph(school_popups, height = 400, width = 500),
     group = "Neighborhoods by school"
-  )
+  ) 
+
+school_map
+
+count <- df |>
+  mutate(
+    CA = str_replace_all(CA, " ", "_"),
+    Neighborhood = fct_na_value_to_level(Neighborhood, level = "NA")
+    ) |>
+  group_by(School, Neighborhood, CA) |>
+  summarise(Students = n()) |>
+  pivot_wider(
+    id_cols = c(School, Neighborhood),
+    names_from = CA,
+    values_from = Students
+  ) |>
+  mutate(
+    across(Chronically_absent:Not_chronically_absent, \(x) coalesce(x, 0)),
+    Students = Chronically_absent + Not_chronically_absent
+    ) |>
+  select(-Not_chronically_absent) |>
+  arrange(School, Neighborhood)
 
 saveWidget(school_map, "school_map.html")
-cumsum(1:100)
+write_csv(count, "chronic attendance.csv")
